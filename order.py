@@ -6,7 +6,7 @@ from ingredients import FLAVORS, TOPPINGS, SIDES
 
 @dataclass
 class Order:
-    flavor: str
+    flavor: str | None = None
     toppings: set[str] = field(default_factory=set)
     side: str | None = None
 
