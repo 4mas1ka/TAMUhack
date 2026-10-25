@@ -1025,7 +1025,7 @@ class CreameryGame(arcade.Window):
             "BUILD STATION", 845, 644, arcade.color.BLACK, 20, anchor_x="center", anchor_y="top", bold=True
         )
         arcade.draw_text(
-            "Left-click = add     Right-click or [ - ] = remove",
+            "Left-click = add           Right-click [ - ] = remove",
             845,
             618,
             (90, 90, 90),
