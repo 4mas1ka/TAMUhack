@@ -5,7 +5,8 @@ import random
 import arcade
 
 
-from customer import Customer
+import assets
+from customer import Customer, WAITING_STATES
 from order import Order, generate_order
 from ingredients import FLAVORS, TOPPINGS, VESSELS, SIDES
 
@@ -17,11 +18,65 @@ SCREEN_HEIGHT = 700
 SCREEN_TITLE = "Rev's Creamery"
 
 
-MAX_CUSTOMERS = 3
-ORDERS_PER_ROUND = 5
-FAST_TIME = 60
+# Both the number of customers per round and how many can be in the shop at once
+# grow with difficulty. The time each customer will wait (ORDER_TIME in customer.py)
+# is the same at every difficulty.
+ORDERS_PER_ROUND = {1: 5, 2: 7, 3: 9}
+MAX_CUSTOMERS = {1: 2, 2: 3, 3: 4}
+FAST_TIME = 60          # seconds after arriving: serve a correct order this fast for 3 stars
 ARRIVAL_GAP = 8
 WIN_AVERAGE = 2.5
+
+# One clock for the whole round (seconds). Same at every difficulty.
+ROUND_TIME = 300
+
+# Ice cream supply: this many scoops until the freezer is empty, then RESTOCK_TIME seconds
+# of refilling during which no new scoops can be added.
+ICE_CREAM_STOCK = 8
+RESTOCK_TIME = 6
+
+# Shop layout: customers stand behind a wooden counter that spans the screen.
+COUNTER_BOTTOM = 115
+COUNTER_TOP = 280
+CUSTOMER_FEET_Y = 272        # a few pixels behind the counter's top edge
+CUSTOMER_MAX_HEIGHT = 198    # height of the tallest character; the others scale with it
+CUSTOMER_SLOTS = [150, 340, 530, 720]   # where customers stand at the counter
+
+# Image files (looked up next to game.py, then in an "assets" folder).
+START_BG_FILES = ("beach1.png",)         # sunset beach: start, trophy screens
+SHOP_BG_FILES = ("beach2.png",)          # daytime beach: the shop and results screens
+COUNTER_FILES = ("wood.png",)
+TROPHY_FILES = ("trophy.png",)
+
+# One entry per customer PNG. "names" are the names that character can be given.
+CHARACTERS = [
+    {   # pink sweatshirt student
+        "key": "sweatshirt_girl",
+        "files": ("female_student__2_.png", "female_student.png"),
+        "names": ["Maya", "Akari", "Noor"],
+    },
+    {   # corps cadet
+        "key": "cadet",
+        "files": ("queen_rev__2_.png", "queen_rev.png"),
+        "names": ["Jordan", "Kai"],
+    },
+    {   # maroon hoodie student
+        "key": "hoodie_student",
+        "files": ("sorority_girl__2_.png", "sorority_girl.png"),
+        "names": ["Tobi", "Avery"],
+    },
+    {   # the collie in the crown
+        "key": "rev",
+        "files": ("stinky_student__2_.png", "stinky_student.png"),
+        "names": ["Rev"],
+    },
+]
+
+# Gold, top row to bottom row, for the pixel-font title.
+TITLE_GRADIENT = [
+    (255, 246, 170), (255, 236, 120), (255, 220, 70), (255, 200, 40),
+    (245, 170, 20), (225, 140, 15), (200, 110, 10),
+]
 
 
 # How many scoops you may stack at each difficulty.
@@ -29,9 +84,6 @@ MAX_SCOOPS = {1: 1, 2: 2, 3: 2}
 # You can add several of the same flavor / topping, up to these limits.
 MAX_EACH_FLAVOR = 2
 MAX_EACH_TOPPING = 3
-
-
-CUSTOMER_NAMES = ["Maya", "Tobi", "Akari", "Jordan", "Noor", "Rev", "Kai", "Avery"]
 
 
 FLAVOR_COLORS = {
@@ -231,8 +283,10 @@ class Button:
 class CreameryGame(arcade.Window):
     def __init__(self):
         super().__init__(SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_TITLE)
+        # Only visible if a background image is missing.
         self.background_color = arcade.color.LIGHT_BLUE
 
+        self.load_art()
 
         self.game_state = "START"
         self.difficulty = 1
@@ -245,6 +299,16 @@ class CreameryGame(arcade.Window):
         self.spawn_timer = 0
         self.building_order = False
 
+        # Overall round clock.
+        self.round_time_left = ROUND_TIME
+        self.time_up = False
+
+        # Ice cream supply: scoops already served since the last refill, and the
+        # restock cooldown (restocking is True while the freezer refills).
+        self.scoops_used = 0
+        self.restocking = False
+        self.restock_left = 0.0
+
 
         # The order being built, plus the order things were added in. The
         # stacks drive the live picture so scoops pile up in the order you
@@ -256,6 +320,37 @@ class CreameryGame(arcade.Window):
 
         self.create_buttons()
 
+
+    # ---------------- ART ----------------
+    def load_art(self):
+        """Load and prepare every image once. Anything missing falls back to plain shapes."""
+        screen = (SCREEN_WIDTH, SCREEN_HEIGHT)
+        self.start_bg = assets.load_background(START_BG_FILES, screen, anchor_y=0.7)
+        self.shop_bg = assets.load_background(SHOP_BG_FILES, screen)
+        self.counter_art = assets.load_counter(
+            COUNTER_FILES, (SCREEN_WIDTH, COUNTER_TOP - COUNTER_BOTTOM)
+        )
+        self.characters = assets.load_characters(CHARACTERS, CUSTOMER_MAX_HEIGHT)
+        self.trophy_art = assets.load_trophy(TROPHY_FILES, 260)
+        self.title_art = assets.pixel_text_art(
+            "REV'S CREAMERY", 11, TITLE_GRADIENT, outline=(70, 25, 60)
+        )
+        self.subtitle_art = assets.pixel_text_art(
+            "BEACHSIDE ICE CREAM SHOP", 5, (255, 255, 255), outline=(60, 30, 70)
+        )
+
+    @staticmethod
+    def draw_art(art, center_x, center_y):
+        # Snap to whole pixels so pixel art stays crisp instead of getting blurry.
+        left = round(center_x - art.width / 2)
+        bottom = round(center_y - art.height / 2)
+        arcade.draw_texture_rect(
+            art.texture, arcade.LBWH(left, bottom, art.width, art.height)
+        )
+
+    def draw_backdrop(self, art):
+        if art is not None:
+            self.draw_art(art, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2)
 
     # ---------------- BUTTONS ----------------
     def make_item_buttons(self, names, colors, first_row_y):
@@ -294,7 +389,7 @@ class CreameryGame(arcade.Window):
 
     def create_buttons(self):
         self.start_button = Button(
-            600, 250, 220, 70, "START", arcade.color.LIGHT_GREEN, font_size=20
+            600, 160, 220, 70, "START", arcade.color.LIGHT_GREEN, font_size=20
         )
         self.build_button = Button(
             600, 80, 190, 55, "MAKE ORDER", arcade.color.LIGHT_GREEN, font_size=15
@@ -344,6 +439,14 @@ class CreameryGame(arcade.Window):
         self.topping_stack = []
 
 
+    @property
+    def orders_per_round(self):
+        return ORDERS_PER_ROUND[self.difficulty]
+
+    @property
+    def max_customers(self):
+        return MAX_CUSTOMERS[self.difficulty]
+
     def start_round(self):
         self.customers = []
         self.customers_created = 0
@@ -353,6 +456,11 @@ class CreameryGame(arcade.Window):
         self.reset_build()
         self.building_order = False
         self.message = ""
+        self.round_time_left = ROUND_TIME
+        self.time_up = False
+        self.scoops_used = 0
+        self.restocking = False
+        self.restock_left = 0.0
         self.game_state = "PLAYING"
         self.add_customer()
         self.spawn_timer = ARRIVAL_GAP
@@ -363,28 +471,34 @@ class CreameryGame(arcade.Window):
 
 
     def add_customer(self):
-        if self.customers_created >= ORDERS_PER_ROUND:
+        if self.customers_created >= self.orders_per_round:
             return
         active = self.active_customers()
-        if len(active) >= MAX_CUSTOMERS:
+        if len(active) >= self.max_customers:
             return
 
 
-        positions = [200, 400, 600]
         used_positions = [customer.target_x for customer in active]
-        available_positions = [p for p in positions if p not in used_positions]
+        available_positions = [p for p in CUSTOMER_SLOTS if p not in used_positions]
         if not available_positions:
             return
 
 
+        # Prefer a character nobody in the shop is using right now.
+        taken_characters = [customer.character for customer in active]
+        free_characters = [c for c in CHARACTERS if c["key"] not in taken_characters]
+        character = random.choice(free_characters or CHARACTERS)
+
         taken_names = [customer.name for customer in active]
-        free_names = [name for name in CUSTOMER_NAMES if name not in taken_names]
+        free_names = [name for name in character["names"] if name not in taken_names]
 
 
         customer = Customer(
-            name=random.choice(free_names or CUSTOMER_NAMES),
+            name=random.choice(free_names or character["names"]),
             order=generate_order(self.difficulty),
             target_x=available_positions[0],
+            y=CUSTOMER_FEET_Y,
+            character=character["key"],
         )
         self.customers.append(customer)
         self.customers_created += 1
@@ -427,7 +541,30 @@ class CreameryGame(arcade.Window):
                 return
 
 
+    def ice_cream_left(self):
+        """Scoops still in the freezer (scoops sitting in the order being built count as taken)."""
+        return max(0, ICE_CREAM_STOCK - self.scoops_used - len(self.scoop_stack))
+
+    def check_restock(self):
+        if not self.restocking and self.ice_cream_left() <= 0:
+            self.restocking = True
+            self.restock_left = RESTOCK_TIME
+            self.message = f"Out of ice cream! Restocking for {RESTOCK_TIME} seconds..."
+
+    def update_restock(self, delta_time):
+        if not self.restocking:
+            return
+        self.restock_left -= delta_time
+        if self.restock_left <= 0:
+            self.restocking = False
+            self.restock_left = 0.0
+            self.scoops_used = 0
+            self.message = "Ice cream restocked!"
+
     def add_flavor(self, flavor):
+        if self.restocking:
+            self.message = f"Out of ice cream! Restocking... {math.ceil(self.restock_left)}s"
+            return
         max_scoops = MAX_SCOOPS[self.difficulty]
         if len(self.scoop_stack) >= max_scoops:
             self.message = f"Maximum {max_scoops} scoop(s) at this difficulty."
@@ -438,6 +575,7 @@ class CreameryGame(arcade.Window):
         self.scoop_stack.append(flavor)
         self.player_order.flavors[flavor] += 1
         self.message = f"Added a scoop of {flavor}"
+        self.check_restock()
 
 
     def remove_flavor(self, flavor):
@@ -493,8 +631,12 @@ class CreameryGame(arcade.Window):
 
         stars = self.calculate_score(customer)
         customer.stars = stars
+        customer.reaction = "happy" if stars >= 2 else "sad"
         self.scores.append(stars)
         self.orders_completed += 1
+
+        # The scoops in this order are used up (they only come back if you cancel/clear).
+        self.scoops_used += len(self.scoop_stack)
 
 
         if stars == 3:
@@ -509,11 +651,13 @@ class CreameryGame(arcade.Window):
         self.selected_customer = None
         self.reset_build()
         self.building_order = False
+        self.check_restock()
         self.check_round_finished()
 
 
     def customer_timed_out(self, customer):
         customer.stars = 0
+        customer.reaction = "sad"
         self.scores.append(0)
         self.orders_completed += 1
         customer.state = "LEAVING"
@@ -530,10 +674,22 @@ class CreameryGame(arcade.Window):
 
 
     def check_round_finished(self):
-        if self.orders_completed >= ORDERS_PER_ROUND:
+        if self.orders_completed >= self.orders_per_round:
             self.game_state = "RESULTS"
             return
         self.spawn_timer = 1
+
+    def end_round_time_up(self):
+        """The round clock hit zero: every customer not served yet counts as 0 stars."""
+        missing = self.orders_per_round - len(self.scores)
+        self.scores.extend([0] * max(0, missing))
+        self.orders_completed = len(self.scores)
+        self.time_up = True
+        self.round_time_left = 0.0
+        self.selected_customer = None
+        self.building_order = False
+        self.reset_build()
+        self.game_state = "RESULTS"
 
 
     def average_score(self):
@@ -556,15 +712,29 @@ class CreameryGame(arcade.Window):
             return
 
 
+        # Overall round clock and the ice cream freezer keep running even while
+        # you are busy building an order.
+        self.round_time_left = max(0.0, self.round_time_left - delta_time)
+        self.update_restock(delta_time)
+
+
         for customer in self.customers:
             customer.walk_to_counter(delta_time)
             customer.leave_shop(delta_time)
+            # Patience runs from the moment a customer reaches the counter.
             customer.update_timer(delta_time)
             if customer.has_timed_out:
                 self.customer_timed_out(customer)
+            if self.game_state != "PLAYING":
+                return
 
 
-        if self.customers_created < ORDERS_PER_ROUND and len(self.active_customers()) < MAX_CUSTOMERS:
+        if self.round_time_left <= 0:
+            self.end_round_time_up()
+            return
+
+
+        if self.customers_created < self.orders_per_round and len(self.active_customers()) < self.max_customers:
             self.spawn_timer -= delta_time
             if self.spawn_timer <= 0:
                 self.add_customer()
@@ -585,37 +755,58 @@ class CreameryGame(arcade.Window):
 
 
     def draw_start(self):
-        arcade.draw_text("REV'S CREAMERY", 600, 500, arcade.color.WHITE, 55, anchor_x="center")
-        arcade.draw_text("Beachside Ice Cream Shop", 600, 430, arcade.color.WHITE, 24, anchor_x="center")
+        self.draw_backdrop(self.start_bg)
+
+        # Pixel-font title (drawn from a pre-rendered image, so no font install needed).
+        self.draw_art(self.title_art, 600, 598)
+        self.draw_art(self.subtitle_art, 600, 505)
+
+        lines = [
+            "1.  Customers walk up to the counter - their patience timer starts right away!",
+            "2.  Click a customer to take their order, then press MAKE ORDER.",
+            "3.  Pick the container, scoops, toppings and side. Right-click removes.",
+            "4.  Press SERVE: right + fast = 3 stars, right = 2, wrong = 1, walked out = 0.",
+            f"5.  Beat the round clock and average {WIN_AVERAGE} stars to unlock the next level.",
+            f"6.  Empty freezer? Restocking the ice cream takes {RESTOCK_TIME} seconds!",
+        ]
+        panel = arcade.XYWH(600, 335, 900, 220)
+        arcade.draw_rect_filled(panel, (0, 0, 0, 165))
+        arcade.draw_rect_outline(panel, (255, 214, 120), 3)
+        arcade.draw_text(
+            "HOW TO PLAY", 600, 418, arcade.color.GOLD, 17, anchor_x="center", bold=True
+        )
+        y = 386
+        for line in lines:
+            arcade.draw_text(line, 170, y, arcade.color.WHITE, 14, anchor_y="center")
+            y -= 27
+
         self.start_button.draw()
 
 
     def draw_shop(self):
-        arcade.draw_rect_filled(arcade.XYWH(600, 550, 1200, 300), arcade.color.SKY_BLUE)
-        arcade.draw_rect_filled(arcade.XYWH(600, 390, 1200, 120), arcade.color.BLUE_GREEN)
-        arcade.draw_rect_filled(arcade.XYWH(600, 250, 1200, 180), arcade.color.TAN)
+        if self.shop_bg is not None:
+            self.draw_backdrop(self.shop_bg)
+        else:
+            # No background image found: fall back to flat colours.
+            arcade.draw_rect_filled(arcade.XYWH(600, 550, 1200, 300), arcade.color.SKY_BLUE)
+            arcade.draw_rect_filled(arcade.XYWH(600, 390, 1200, 120), arcade.color.BLUE_GREEN)
 
 
         if self.building_order:
+            self.draw_counter()
             self.draw_split_screen()
+            self.draw_waiting_strip()
         else:
-            self.draw_customers()
+            self.draw_customer_sprites()
+            self.draw_counter()
+            self.draw_customer_plates()
             if self.selected_customer and self.selected_customer.order_taken:
                 self.draw_ticket(self.selected_customer, 600, 560, 650, 170, 13, 19)
                 self.build_button.draw()
 
 
         # Header goes last so it always sits on top and is never covered.
-        arcade.draw_text("REV'S CREAMERY", 25, 658, arcade.color.WHITE, 26, bold=True)
-        arcade.draw_text(
-            f"Difficulty: {self.difficulty}     Orders: {self.orders_completed}/{ORDERS_PER_ROUND}",
-            1175,
-            664,
-            arcade.color.WHITE,
-            16,
-            anchor_x="right",
-            bold=True,
-        )
+        self.draw_header()
 
 
         if self.message:
@@ -631,23 +822,155 @@ class CreameryGame(arcade.Window):
             )
 
 
-    def draw_customers(self):
-        arcade.draw_rect_filled(arcade.XYWH(600, 240, 1200, 120), arcade.color.LIGHT_BROWN)
+    def draw_header(self):
+        arcade.draw_rect_filled(arcade.LBWH(0, 652, SCREEN_WIDTH, 48), (0, 0, 0, 140))
+        arcade.draw_text("REV'S CREAMERY", 25, 658, arcade.color.WHITE, 26, bold=True)
+
+        # Overall round clock.
+        seconds = max(0, math.ceil(self.round_time_left))
+        minutes, secs = divmod(seconds, 60)
+        if seconds <= 30:
+            clock_color = arcade.color.RED
+        elif seconds <= 60:
+            clock_color = arcade.color.ORANGE
+        else:
+            clock_color = arcade.color.WHITE
+        arcade.draw_text(
+            f"TIME LEFT  {minutes}:{secs:02d}",
+            600,
+            661,
+            clock_color,
+            20,
+            anchor_x="center",
+            bold=True,
+        )
+
+        arcade.draw_text(
+            f"Difficulty: {self.difficulty}     Orders: {self.orders_completed}/{self.orders_per_round}",
+            1175,
+            664,
+            arcade.color.WHITE,
+            16,
+            anchor_x="right",
+            bold=True,
+        )
 
 
+    def draw_counter(self):
+        height = COUNTER_TOP - COUNTER_BOTTOM
+        center_y = COUNTER_BOTTOM + height / 2
+        if self.counter_art is not None:
+            self.draw_art(self.counter_art, SCREEN_WIDTH / 2, center_y)
+        else:
+            arcade.draw_rect_filled(
+                arcade.XYWH(SCREEN_WIDTH / 2, center_y, SCREEN_WIDTH, height), arcade.color.LIGHT_BROWN
+            )
+        # Dark edges give the counter a bit of depth.
+        arcade.draw_line(0, COUNTER_TOP, SCREEN_WIDTH, COUNTER_TOP, (55, 28, 10), 5)
+        arcade.draw_line(0, COUNTER_BOTTOM, SCREEN_WIDTH, COUNTER_BOTTOM, (55, 28, 10), 5)
+
+
+    def draw_customer_sprites(self):
+        # Customers who are still walking are drawn first, so they pass behind the
+        # customers standing at the counter.
+        customers = sorted(self.active_customers(), key=lambda c: c.state in WAITING_STATES)
+        for customer in customers:
+            bob = 0.0
+            if customer.state in ("ENTERING", "LEAVING"):
+                bob = abs(math.sin(customer.x * 0.06)) * 6   # little walking hop
+            art = self.characters.get(customer.character)
+            if art is not None:
+                self.draw_art(art, customer.x, customer.y + bob + art.height / 2)
+            else:
+                # Image missing: the original pink circle.
+                arcade.draw_circle_filled(customer.x, customer.y + bob + 45, 45, arcade.color.PINK)
+
+
+    def draw_customer_plates(self):
+        """Name, patience bar and status for everyone waiting, on the front of the counter."""
         for customer in self.active_customers():
-            if customer is self.selected_customer:
-                arcade.draw_circle_outline(customer.x, customer.y, 58, arcade.color.YELLOW, 5)
+            if customer.state not in WAITING_STATES:
+                continue
+            selected = customer is self.selected_customer
+            x = customer.x
 
+            if selected:
+                art = self.characters.get(customer.character)
+                width = art.width if art else 90
+                height = art.height if art else 90
+                arcade.draw_rect_outline(
+                    arcade.XYWH(x, customer.y + height / 2 + 2, width + 20, height + 12),
+                    arcade.color.YELLOW,
+                    4,
+                )
 
-            arcade.draw_circle_filled(customer.x, customer.y, 45, arcade.color.PINK)
-            arcade.draw_text(customer.name, customer.x, customer.y + 60, arcade.color.WHITE, 15, anchor_x="center")
-
+            plate = arcade.XYWH(x, 216, 170, 102)
+            arcade.draw_rect_filled(plate, (35, 22, 12, 185))
+            arcade.draw_rect_outline(
+                plate,
+                arcade.color.YELLOW if selected else (235, 200, 140),
+                3 if selected else 2,
+            )
+            arcade.draw_text(
+                customer.name, x, 242, arcade.color.WHITE, 14, anchor_x="center", bold=True
+            )
+            self.draw_timer_bar(
+                customer, x, 224, 144, label_dy=-23, label_color=arcade.color.WHITE
+            )
 
             if customer.is_waiting_to_order:
-                arcade.draw_text("ORDER?", customer.x, customer.y - 70, arcade.color.YELLOW, 14, anchor_x="center")
-            elif customer.is_waiting_for_food:
-                self.draw_timer_bar(customer, customer.x, customer.y - 75)
+                status, status_color = "CLICK TO ORDER", arcade.color.YELLOW
+            elif selected:
+                status, status_color = "SELECTED", arcade.color.YELLOW
+            else:
+                status, status_color = "Order taken", (225, 225, 225)
+            arcade.draw_text(
+                status, x, 179, status_color, 12, anchor_x="center", bold=True
+            )
+
+
+    def draw_avatar(self, customer, center_x, center_y):
+        art = self.characters.get(customer.character)
+        frame = arcade.XYWH(center_x, center_y, 68, 68)
+        if art is not None and art.avatar is not None:
+            arcade.draw_rect_filled(frame, (255, 250, 238))
+            arcade.draw_texture_rect(art.avatar, arcade.XYWH(center_x, center_y, 64, 64))
+            arcade.draw_rect_outline(frame, arcade.color.BLACK, 2)
+        else:
+            arcade.draw_circle_filled(center_x, center_y, 30, arcade.color.PINK)
+            arcade.draw_circle_outline(center_x, center_y, 30, arcade.color.BLACK, 2)
+
+
+    def draw_waiting_strip(self):
+        """While you build, show everyone else's patience so you can plan your next move."""
+        others = [
+            customer
+            for customer in self.active_customers()
+            if customer is not self.selected_customer and customer.state in WAITING_STATES
+        ]
+        for i, customer in enumerate(others):
+            left = 18 + i * 182
+            chip = arcade.LBWH(left, 56, 174, 50)
+            arcade.draw_rect_filled(chip, (0, 0, 0, 150))
+            arcade.draw_rect_outline(chip, (235, 200, 140), 2)
+
+            art = self.characters.get(customer.character)
+            if art is not None and art.avatar_small is not None:
+                arcade.draw_texture_rect(art.avatar_small, arcade.XYWH(left + 27, 81, 40, 40))
+            else:
+                arcade.draw_circle_filled(left + 27, 81, 18, arcade.color.PINK)
+
+            arcade.draw_text(
+                f"{customer.name}  {int(customer.time_left)}s",
+                left + 54,
+                87,
+                arcade.color.WHITE,
+                11,
+                bold=True,
+            )
+            self.draw_timer_bar(
+                customer, left + 54 + 57, 74, 114, label=False, bar_height=10
+            )
 
 
     def draw_section_label(self, text, x, y, line=True):
@@ -668,8 +991,7 @@ class CreameryGame(arcade.Window):
         arcade.draw_rect_outline(left_panel, (160, 140, 110), 3)
 
 
-        arcade.draw_circle_filled(65, 605, 30, arcade.color.PINK)
-        arcade.draw_circle_outline(65, 605, 30, arcade.color.BLACK, 2)
+        self.draw_avatar(customer, 65, 605)
         arcade.draw_text(
             customer.name, 110, 620, arcade.color.BLACK, 18, anchor_y="center", bold=True
         )
@@ -733,6 +1055,10 @@ class CreameryGame(arcade.Window):
             minus.draw(disabled=count == 0)
 
 
+        if self.restocking:
+            self.draw_restock_banner()
+
+
         # Toppings.
         self.draw_section_label("TOPPINGS", MENU_LEFT, 398)
         for button, minus in zip(self.topping_buttons, self.topping_minus_buttons):
@@ -755,9 +1081,65 @@ class CreameryGame(arcade.Window):
         )
 
 
+        self.draw_supply_meter()
+
         self.cancel_button.draw()
         self.clear_button.draw()
         self.serve_button.draw()
+
+
+    def draw_restock_banner(self):
+        center_x = (MENU_LEFT + MENU_RIGHT) / 2
+        arcade.draw_rect_filled(
+            arcade.XYWH(center_x, 452, MENU_RIGHT - MENU_LEFT + 12, 96), (20, 20, 40, 150)
+        )
+        banner = arcade.XYWH(center_x, 452, 560, 46)
+        arcade.draw_rect_filled(banner, (170, 40, 40))
+        arcade.draw_rect_outline(banner, arcade.color.WHITE, 3)
+        arcade.draw_text(
+            f"OUT OF ICE CREAM!  Restocking... {math.ceil(self.restock_left)}s",
+            center_x,
+            452,
+            arcade.color.WHITE,
+            15,
+            anchor_x="center",
+            anchor_y="center",
+            bold=True,
+        )
+
+
+    def draw_supply_meter(self):
+        label_x = 830
+        bar_left = 948
+        bar_width = 126
+        y = 218
+
+        arcade.draw_text("ICE CREAM:", label_x, y, INK, 12, anchor_y="center", bold=True)
+        arcade.draw_rect_filled(
+            arcade.XYWH(bar_left + bar_width / 2, y, bar_width, 16), arcade.color.DARK_GRAY
+        )
+
+        if self.restocking:
+            fraction = 1 - self.restock_left / RESTOCK_TIME
+            color = (90, 170, 230)
+            text = "REFILLING"
+        else:
+            left = self.ice_cream_left()
+            fraction = left / ICE_CREAM_STOCK
+            if fraction > 0.5:
+                color = arcade.color.GREEN
+            elif fraction > 0.25:
+                color = arcade.color.ORANGE
+            else:
+                color = arcade.color.RED
+            text = f"{left}/{ICE_CREAM_STOCK}"
+
+        fraction = max(0.0, min(1.0, fraction))
+        if fraction > 0:
+            arcade.draw_rect_filled(
+                arcade.LBWH(bar_left, y - 8, bar_width * fraction, 16), color
+            )
+        arcade.draw_text(text, bar_left + bar_width + 10, y, INK, 12, anchor_y="center", bold=True)
 
 
     # ---------------- LIVE ICE CREAM ----------------
@@ -1048,8 +1430,18 @@ class CreameryGame(arcade.Window):
                 y -= 4
 
 
-    def draw_timer_bar(self, customer, x, y, width=170):
-        arcade.draw_rect_filled(arcade.XYWH(x, y, width, 15), arcade.color.DARK_GRAY)
+    def draw_timer_bar(
+        self,
+        customer,
+        x,
+        y,
+        width=170,
+        label_dy=-30,
+        label_color=arcade.color.BLACK,
+        label=True,
+        bar_height=15,
+    ):
+        arcade.draw_rect_filled(arcade.XYWH(x, y, width, bar_height), arcade.color.DARK_GRAY)
 
 
         if customer.patience_level == "good":
@@ -1062,28 +1454,89 @@ class CreameryGame(arcade.Window):
 
         if customer.timer_fraction > 0:
             arcade.draw_rect_filled(
-                arcade.LBWH(x - width / 2, y - 7.5, width * customer.timer_fraction, 15),
+                arcade.LBWH(
+                    x - width / 2, y - bar_height / 2, width * customer.timer_fraction, bar_height
+                ),
                 color,
             )
 
 
-        arcade.draw_text(f"{int(customer.time_left)} sec", x, y - 30, arcade.color.BLACK, 12, anchor_x="center")
+        if label:
+            arcade.draw_text(
+                f"{int(customer.time_left)} sec", x, y + label_dy, label_color, 12, anchor_x="center"
+            )
 
 
     # ---------------- RESULTS ----------------
     def draw_results(self):
+        self.draw_backdrop(self.shop_bg)
+
         average = self.average_score()
-        arcade.draw_text("ROUND COMPLETE!", 600, 530, arcade.color.WHITE, 45, anchor_x="center")
-        arcade.draw_text(f"Average: {average:.2f} / 3.00", 600, 430, arcade.color.WHITE, 28, anchor_x="center")
-        arcade.draw_text(f"Total Stars: {sum(self.scores)} / 15", 600, 380, arcade.color.WHITE, 20, anchor_x="center")
+        total_orders = self.orders_per_round
+        panel = arcade.XYWH(600, 440, 760, 290)
+        arcade.draw_rect_filled(panel, (0, 0, 0, 160))
+        arcade.draw_rect_outline(panel, (255, 214, 120), 3)
+
+        title = "TIME'S UP!" if self.time_up else "ROUND COMPLETE!"
+        arcade.draw_text(title, 600, 520, arcade.color.WHITE, 42, anchor_x="center", bold=True)
+        arcade.draw_text(f"Average: {average:.2f} / 3.00", 600, 440, arcade.color.WHITE, 28, anchor_x="center")
+        arcade.draw_text(
+            f"Total Stars: {sum(self.scores)} / {3 * total_orders}",
+            600,
+            392,
+            arcade.color.WHITE,
+            20,
+            anchor_x="center",
+        )
+
+        if self.time_up:
+            arcade.draw_text(
+                "The clock ran out - customers not served count as 0 stars.",
+                600,
+                340,
+                arcade.color.ORANGE,
+                16,
+                anchor_x="center",
+            )
+        else:
+            seconds = max(0, math.ceil(self.round_time_left))
+            minutes, secs = divmod(seconds, 60)
+            arcade.draw_text(
+                f"Time left on the clock: {minutes}:{secs:02d}",
+                600,
+                340,
+                arcade.color.WHITE,
+                16,
+                anchor_x="center",
+            )
+
         self.retry_button.draw()
         if average >= WIN_AVERAGE:
             self.upgrade_button.draw()
 
 
     def draw_trophy(self):
-        arcade.draw_text("GOLDEN SCOOP TROPHY!", 600, 450, arcade.color.GOLD, 40, anchor_x="center")
-        arcade.draw_circle_filled(600, 300, 80, arcade.color.GOLD)
+        self.draw_backdrop(self.start_bg)
+
+        panel = arcade.XYWH(600, 470, 800, 130)
+        arcade.draw_rect_filled(panel, (0, 0, 0, 160))
+        arcade.draw_rect_outline(panel, (255, 214, 120), 3)
+        arcade.draw_text(
+            "GOLDEN SCOOP TROPHY!", 600, 480, arcade.color.GOLD, 40, anchor_x="center", bold=True
+        )
+        arcade.draw_text(
+            "You served every difficulty like a pro!",
+            600,
+            432,
+            arcade.color.WHITE,
+            18,
+            anchor_x="center",
+        )
+
+        if self.trophy_art is not None:
+            self.draw_art(self.trophy_art, 600, 255)
+        else:
+            arcade.draw_circle_filled(600, 300, 80, arcade.color.GOLD)
 
 
     # ---------------- INPUT ----------------
@@ -1095,6 +1548,19 @@ class CreameryGame(arcade.Window):
         elif not removing:
             setattr(self.player_order, attribute, value)
             self.message = f"Chose {value}"
+
+
+    def customer_at(self, x, y):
+        """The waiting customer under the mouse (their sprite or the name plate below it)."""
+        for customer in self.active_customers():
+            # Customers who are walking in or out can't be picked.
+            if customer.state not in WAITING_STATES:
+                continue
+            art = self.characters.get(customer.character)
+            top = customer.y + (art.height if art else 90) + 10
+            if abs(x - customer.x) <= 85 and 165 <= y <= top:
+                return customer
+        return None
 
 
     def on_mouse_press(self, x, y, button, modifiers):
@@ -1118,18 +1584,14 @@ class CreameryGame(arcade.Window):
 
 
         if not self.building_order:
-            for customer in self.active_customers():
-                # Customers who are walking in or out can't be picked.
-                if not (customer.is_waiting_to_order or customer.is_waiting_for_food):
-                    continue
-                distance = (x - customer.x) ** 2 + (y - customer.y) ** 2
-                if distance <= 65 ** 2:
-                    self.selected_customer = customer
-                    if customer.is_waiting_to_order:
-                        self.take_order(customer)
-                    else:
-                        self.message = f"Selected {customer.name}"
-                    return
+            customer = self.customer_at(x, y)
+            if customer is not None:
+                self.selected_customer = customer
+                if customer.is_waiting_to_order:
+                    self.take_order(customer)
+                else:
+                    self.message = f"Selected {customer.name}"
+                return
 
 
             if self.selected_customer is not None and self.build_button.contains(x, y):

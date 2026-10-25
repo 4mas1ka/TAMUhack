@@ -7,6 +7,9 @@ from order import Order
 ORDER_TIME = 90
 PATIENCE_WARN = 30
 PATIENCE_CRITICAL = 15
+# Customers only lose patience while they are standing at the counter.
+WAITING_STATES = ("WAITING_TO_ORDER", "WAITING_FOR_FOOD")
+
 WALK_IN_SPEED = 220
 WALK_OUT_SPEED = 250
 OFFSCREEN_MARGIN = 100
@@ -44,8 +47,11 @@ class Customer:
     state: str = "ENTERING"
 
     x: float = 1300
-    y: float = 390
+    y: float = 272          # where the customer's feet stand (the top of the counter)
     target_x: float = 600
+
+    # Which character PNG this customer uses (a key from CHARACTERS in assets/game).
+    character: str = ""
 
     order_taken: bool = False
 
@@ -68,12 +74,14 @@ class Customer:
         return self.state == "WAITING_FOR_FOOD"
 
     @property
+    def is_timer_running(self):
+        # The patience timer runs from the moment the customer reaches the counter,
+        # whether or not you have taken their order yet.
+        return self.state in WAITING_STATES
+
+    @property
     def has_timed_out(self):
-        return (
-            self.order_taken
-            and self.is_waiting_for_food
-            and self.time_left <= 0
-        )
+        return self.is_timer_running and self.time_left <= 0
 
     @property
     def time_used(self):
@@ -106,15 +114,13 @@ class Customer:
         return "critical"
 
     def start_order_timer(self):
+        # Taking the order no longer starts (or resets) the clock - it has been
+        # running since the customer arrived at the counter.
         self.order_taken = True
-        self.time_left = self.total_time
         self.state = "WAITING_FOR_FOOD"
 
     def update_timer(self, delta_time):
-        if (
-            not self.order_taken
-            or not self.is_waiting_for_food
-        ):
+        if not self.is_timer_running:
             return
 
         self.time_left = max(
