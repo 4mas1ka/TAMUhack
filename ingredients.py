@@ -1,22 +1,26 @@
 FLAVORS = [
-    # all the possible different ice cream flavours for selectrion
     "Vanilla",
-    "Strawberry",
-    "Cookies n cream"
     "Chocolate",
-    "Ice Cream Sandwich"
+    "Strawberry",
+    "Mint",
+    "Cookie Dough"
 ]
-
 
 TOPPINGS = [
-    #all the possible ice cream toppings 
     "Sprinkles",
-    "Strawberries",
-    "Cherries",
+    "Caramel Drizzle",
     "Chocolate Drizzle",
-    "Caramel Drizzle"
+    "Cherries",
+    "Strawberries",
+    "Whipped Cream",
+    "Chocolate Chips",
+    "Crushed Oreos"
 ]
 
+VESSELS = [
+    "Cone",
+    "Cup"
+]
 
 SIDES = [
     "Chips",
